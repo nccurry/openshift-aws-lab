@@ -16,8 +16,6 @@
     - "RHSM_PASSWORD"
     - "RHSM_POOL"
     tags:
-    - deploy
-    - ssh
     - bootstrap
     - install
     - prerequisites

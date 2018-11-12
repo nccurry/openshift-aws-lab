@@ -692,6 +692,12 @@ Resources:
       - Key: ClusterId
         Value: !Ref ClusterId
 
+  MasterEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref MasterNode
+      Domain: vpc
+
   InfraNode:
     Type: AWS::EC2::Instance
     DependsOn: SubnetRouteTableAssociation
@@ -723,6 +729,12 @@ Resources:
       - Key: ClusterId
         Value: !Ref ClusterId
 
+  InfraEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref InfraNode
+      Domain: vpc
+
   AppNode:
     Type: AWS::EC2::Instance
     DependsOn: SubnetRouteTableAssociation
@@ -753,6 +765,12 @@ Resources:
         Value: !Ref ClusterId
       - Key: ClusterId
         Value: !Ref ClusterId
+
+  AppEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref AppNode
+      Domain: vpc
 
 # DNS Entries
 
