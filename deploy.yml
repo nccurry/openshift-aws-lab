@@ -1,0 +1,318 @@
+#!/usr/bin/ansible-playbook
+---
+- name: Deploy infrastructure
+  hosts: localhost
+  gather_facts: false
+  become: false
+  vars_files:
+  - defaults/main.yml
+  tasks:
+  - name: Ensure rhsm environment variables have been set
+    fail:
+      msg: "Required environment variable '{{ item }}' is not defined."
+    when: lookup('env', item) == ""
+    with_items:
+    - "RHSM_USERNAME"
+    - "RHSM_PASSWORD"
+    - "RHSM_POOL"
+    tags:
+    - deploy
+    - ssh
+    - bootstrap
+    - install
+    - prerequisites
+    - cluster
+
+  - name: Ensure prerequisites are installed
+    become: true
+    package:
+      name: python-passlib
+      state: present
+    tags:
+    - install
+    - cluster
+
+  - name: Set current public IP address
+    command: curl https://ifconfig.co
+    changed_when: false
+    register: public_ip
+    tags:
+    - deploy
+
+  # This is needed here to avoid having to set variables in defaults/main.yml AND in vars/X.yml
+  # These variables are injected into the import_playbook tasks used to install OpenShift below
+  - name: Set local variables
+    set_fact:
+      openshift_clusterid: "{{ cluster_id }}"
+      root_route_53_domain: "{{ root_route_53_domain }}"
+    tags:
+    - install
+    - prerequisites
+    - cluster
+
+  - name: Set profile in ec2.ini
+    lineinfile:
+      path: inventory/ec2.ini
+      regexp: '^.*boto_profile =.*$'
+      state: present
+      line: 'boto_profile = {{ aws_profile }}'
+    tags:
+    - deploy
+    - ssh
+    - bootstrap
+    - install
+
+  - name: Ensure .ssh directory exists
+    file:
+      state: directory
+      path: "{{ lookup('env', 'HOME') }}/.ssh"
+    tags:
+    - deploy
+
+  - name: Create ec2 keypair
+    ec2_key:
+      name: "{{ ec2_keypair }}"
+      state: present
+      region: us-east-1
+      profile: "{{ aws_profile }}"
+    register: ami_ec2_key
+    tags:
+    - deploy
+
+  - name: Create private key file
+    copy:
+      content: "{{ ami_ec2_key.key.private_key }}"
+      dest: "{{ lookup('env', 'HOME') }}/.ssh/{{ ec2_keypair }}"
+      mode: 0600
+    when: ami_ec2_key.changed
+    tags:
+    - deploy
+
+  - name: Deploy cloudformation stack
+    block:
+    - cloudformation:
+        stack_name: "{{ cluster_id }}-ocp-environment"
+        state: present
+        region: us-east-1
+        profile: "{{ aws_profile }}"
+        disable_rollback: true
+        template: files/cloudformation.yml
+        template_parameters:
+          ClusterId: "{{ cluster_id }}"
+          RootRoute53Domain: "{{ root_route_53_domain }}."
+          HomeCidr: "{{ public_ip.stdout }}/32"
+          AmiId: "{{ ami_id }}"
+          Ec2Keypair: "{{ ec2_keypair }}"
+          MasterInstanceType: "{{ master_instance_type }}"
+          InfraInstanceType: "{{ infra_instance_type }}"
+          AppInstanceType: "{{ app_instance_type }}"
+        tags:
+          Stack: "{{ cluster_id }}-ocp-environment"
+          ClusterId: "{{ cluster_id }}"
+      register: cloudformation_output
+    rescue:
+    - name: Remove stack on faiulre
+      cloudformation:
+        stack_name: "{{ cluster_id }}-ocp-environment"
+        state: absent
+        region: us-east-1
+        profile: "{{ aws_profile }}"
+    - fail:
+        msg: "There was a problem deploying the CloudFormation template {{ cloudformation_output.get('log', '') }}"
+    tags:
+    - deploy
+
+  - name: Refresh dynamic inventory
+    meta: refresh_inventory
+
+  - name: Generate ssh configurations
+    blockinfile:
+      path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+      marker: "#### {mark} {{ cluster_id }}-ocp-environment ####"
+      block: |
+        {% for ip in groups.get('tag_Name_' + cluster_id + '_ocp_master_node', []) %}
+        Host {{ cluster_id }}-master-{{ loop.index }} {{ hostvars[ip].ec2_ip_address }} {{ hostvars[ip].ec2_public_dns_name }} {{ hostvars[ip].ec2_private_dns_name }} {{ ip }}
+            Hostname {{ hostvars[ip].ec2_ip_address }}
+            IdentityFile {{ lookup('env', 'HOME') }}/.ssh/{{ ec2_keypair }}
+            PasswordAuthentication no
+            PreferredAuthentications publickey
+            ProxyCommand none
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            User ec2-user
+        {% endfor %}
+
+        {% for ip in groups.get('tag_Name_' + cluster_id + '_ocp_infra_node', []) %}
+        Host {{ cluster_id }}-infra-{{ loop.index }} {{ hostvars[ip].ec2_ip_address }} {{ hostvars[ip].ec2_public_dns_name }} {{ hostvars[ip].ec2_private_dns_name }} {{ ip }}
+            Hostname {{ hostvars[ip].ec2_ip_address }}
+            IdentityFile {{ lookup('env', 'HOME') }}/.ssh/{{ ec2_keypair }}
+            PasswordAuthentication no
+            PreferredAuthentications publickey
+            ProxyCommand none
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            User ec2-user
+        {% endfor %}
+
+        {% for ip in groups.get('tag_Name_' + cluster_id + '_ocp_app_node', []) %}
+        Host {{ cluster_id }}-app-{{ loop.index }} {{ hostvars[ip].ec2_ip_address }} {{ hostvars[ip].ec2_public_dns_name }} {{ hostvars[ip].ec2_private_dns_name }} {{ ip }}
+            Hostname {{ hostvars[ip].ec2_ip_address }}
+            IdentityFile {{ lookup('env', 'HOME') }}/.ssh/{{ ec2_keypair }}
+            PasswordAuthentication no
+            PreferredAuthentications publickey
+            ProxyCommand none
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            User ec2-user
+        {% endfor %}
+      create: yes
+    tags:
+    - ssh
+
+  - name: Create master hosts group
+    add_host:
+      name: "{{ hostvars[item].ec2_private_dns_name }}"
+      groups: masters, etcd, nodes
+      openshift_node_group_name: node-config-master
+    changed_when: false
+    with_items: "{{ groups.get('tag_Name_' + cluster_id + '_ocp_master_node', []) }}"
+    tags:
+    - bootstrap
+    - install
+    - prerequisites
+    - cluster
+
+  - name: Create infra hosts group
+    add_host:
+      name: "{{ hostvars[item].ec2_private_dns_name }}"
+      groups: infra, nodes
+      openshift_node_group_name: node-config-infra
+    changed_when: false
+    with_items: "{{ groups.get('tag_Name_' + cluster_id + '_ocp_infra_node', []) }}"
+    tags:
+    - bootstrap
+    - install
+    - prerequisites
+    - cluster
+
+  - name: Create app hosts group
+    add_host:
+      name: "{{ hostvars[item].ec2_private_dns_name }}"
+      groups: app, nodes
+      openshift_node_group_name: node-config-compute
+    changed_when: false
+    with_items: "{{ groups.get('tag_Name_' + cluster_id + '_ocp_app_node', []) }}"
+    tags:
+    - bootstrap
+    - install
+    - prerequisites
+    - cluster
+
+- name: Configure rhsm
+  hosts: nodes
+  gather_facts: false
+  become: true
+  vars_files:
+  - defaults/main.yml
+  tags:
+  - bootstrap
+  tasks:
+  - name: Remove stock yum repos
+    file:
+      path: "/etc/yum.repos.d/{{ item }}"
+      state: absent
+    with_items:
+    - redhat-rhui-client-config.repo
+    - redhat-rhui.repo
+    - rhui-load-balancers.conf
+
+  - name: Register to rhsm and attach pool
+    redhat_subscription:
+      username: "{{ lookup('env', 'RHSM_USERNAME') }}"
+      password: "{{ lookup('env', 'RHSM_PASSWORD') }}"
+      pool_ids: "{{ lookup('env', 'RHSM_POOL') }}"
+      state: present
+    register: rhsm_result
+    until: rhsm_result is success
+    retries: 10
+    delay: 1
+    ignore_errors: yes
+
+  - assert:
+      that: rhsm_result is success
+      msg: "Failed to subscribe to Red Hat subscription management on {{ inventory_hostname }}"
+
+  - name: Check enabled repositories
+    shell: subscription-manager repos --list-enabled | grep Enabled | wc -l
+    register: rhsm_enabled
+    changed_when: false
+
+  - name: Disable all rhsm repositories
+    shell: "subscription-manager repos --disable=*"
+    when: (rhsm_enabled.stdout | int) != (rhsm_repos | length | int) and (rhsm_enabled.stdout | int) != 0
+
+  - name: Enable openshift repositories
+    command: "subscription-manager repos --enable='{{ item }}'"
+    with_items: "{{ rhsm_repos }}"
+    when: (rhsm_enabled.stdout | int) != (rhsm_repos | length | int)
+
+  - name: Install deltarpm
+    yum:
+      name: deltarpm
+      state: present
+
+  - name: Uninstall packages
+    yum:
+      name: "{{ remove_packages }}"
+      state: absent
+    register: yum_uninstall
+    retries: 5
+    delay: 1
+    until: yum_uninstall.rc == 0
+
+  - name: Update packages
+    yum:
+      name: "*"
+      state: latest
+    register: yum_update
+    retries: 5
+    delay: 1
+    until: yum_update.rc == 0
+
+  - name: Install packages
+    yum:
+      name: "{{ install_packages }}"
+      state: installed
+    register: yum_install
+    retries: 5
+    delay: 1
+    until: yum_install.rc == 0
+
+- name: Install prerequisites
+  vars:
+    openshift_clusterid: "{{ hostvars.localhost.openshift_clusterid }}"
+    ansible_user: ec2-user
+    ansible_become: true
+  import_playbook: /usr/share/ansible/openshift-ansible/playbooks/prerequisites.yml
+  tags:
+  - install
+  - prerequisites
+
+- name: Install openshift
+  vars:
+    openshift_clusterid: "{{ hostvars.localhost.openshift_clusterid }}"
+    ansible_user: ec2-user
+    ansible_become: true
+    root_route_53_domain: "{{ hostvars.localhost.root_route_53_domain }}"
+  import_playbook: /usr/share/ansible/openshift-ansible/playbooks/deploy_cluster.yml
+  tags:
+  - install
+  - cluster
+
+- name: Post-installation configuration
+  hosts: masters[0]
+  become: true
+  gather_facts: false
+  tasks:
+  - name: Add cluster-admin to default admin user
+    command: oc adm policy add-cluster-role-to-user cluster-admin admin

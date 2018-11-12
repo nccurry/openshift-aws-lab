@@ -1,0 +1,37 @@
+aws_profile: ncc
+cluster_id: threeeleven
+root_route_53_domain: nccurry.com
+ami_id: ami-0456c465f72bd0c95
+ec2_keypair: "{{ cluster_id }}-ocp-keypair"
+master_instance_type: t3.xlarge
+infra_instance_type: t3.xlarge
+app_instance_type: t3.xlarge
+install_packages:
+- wget
+- git
+- net-tools
+- bind-utils
+- yum-utils
+- iptables-services
+- bridge-utils
+- bash-completion
+- kexec-tools
+- sos
+- psacct
+- vim
+- docker-1.13.1
+remove_packages:
+- qemu-guest-agent
+- rhn-check
+- rhnlib
+- rhn-client-tools
+- rhnsd
+- rhn-setup
+- yum-rhn-plugin
+- rh-amazon-rhui-client
+- Red_Hat_Enterprise_Linux_Release_Notes-7-en-US
+rhsm_repos:
+- rhel-7-server-rpms
+- rhel-7-server-extras-rpms
+- rhel-7-server-ose-3.11-rpms
+- rhel-7-server-ansible-2.6-rpms

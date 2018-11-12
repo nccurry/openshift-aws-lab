@@ -1,0 +1,32 @@
+---
+# https://docs.openshift.com/container-platform/3.11/install/configuring_inventory_file.html
+# https://github.com/openshift/openshift-ansible/blob/release-3.11/inventory/hosts.example
+openshift_deployment_type: openshift-enterprise
+openshift_master_default_subdomain: "apps.{{ openshift_clusterid }}.ocp.{{ root_route_53_domain }}"
+openshift_master_cluster_public_hostname: "api.{{ openshift_clusterid }}.ocp.{{ root_route_53_domain }}"
+openshift_master_cluster_hostname: "internal.{{ openshift_clusterid }}.ocp.{{ root_route_53_domain }}"
+openshift_release: "3.11"
+debug_level: 2
+openshift_install_examples: true
+oreg_auth_user: "{{ lookup('env', 'RHSM_USERNAME') }}"
+oreg_auth_password: "{{ lookup('env', 'RHSM_PASSWORD') }}"
+openshift_master_identity_providers:
+- name: htpasswd_auth
+  login: true
+  challenge: true
+  kind: HTPasswdPasswordIdentityProvider
+openshift_master_htpasswd_users:
+  admin: '$apr1$O5Ha21L7$ZuyvHx184scXQ/yLJr6ps1'
+openshift_cloudprovider_kind: aws
+openshift_hosted_router_replicas: 1
+openshift_hosted_registry_replicas: 1
+openshift_metrics_install_metrics: true
+openshift_metrics_server_install: true
+openshift_logging_install_logging: true
+openshift_logging_es_nodeselector:
+  'node-role.kubernetes.io/infra': 'true'
+os_sdn_network_plugin_name: redhat/openshift-ovs-multitenant
+openshift_master_api_port: 443
+openshift_master_console_port: 443
+
+

@@ -1,0 +1,796 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: OpenShift environment
+
+Parameters:
+
+  ClusterId:
+    Type: String
+    Description: OpenShift cluster ID
+    Default: ocp
+
+  RootRoute53Domain:
+    Type: String
+    Description: Root Route 53 Domain
+    Default: nccurry.com
+
+  HomeCidr:
+    Type: String
+    Description: Home IP CIDR to whitelist
+    Default: 99.125.112.47/32
+
+  AmiId:
+    Type: String
+    Description: AMI to use for cluster hosts
+    Default: ami-0456c465f72bd0c95 # RHEL-7.5_HVM-20180813-x86_64-0-Access2-GP2
+
+  Ec2Keypair:
+    Type: String
+    Description: SSH keypair to use for ec2 instances
+    Default: ocp
+
+  MasterInstanceType:
+    Type: String
+    Description: EC2 instance type for master
+    Default: t3.nano
+
+  InfraInstanceType:
+    Type: String
+    Description: EC2 instance type for infra
+    Default: t3.nano
+
+  AppInstanceType:
+    Type: String
+    Description: EC2 instance type for app
+    Default: t3.nano
+
+Resources:
+
+# VPC
+
+  Vpc:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/23
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-vpc' ] ]
+      - Key: ClusterId
+        Value: !Ref ClusterId
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+
+  InternetGateway:
+    DependsOn: Vpc
+    Type: 'AWS::EC2::InternetGateway'
+
+  InternetGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    DependsOn: InternetGateway
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  Subnet:
+    Type: 'AWS::EC2::Subnet'
+    DependsOn: Vpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: us-east-1a
+      CidrBlock: 10.0.0.0/24
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-vpc-public-subnet' ] ]
+      - Key: ClusterId
+        Value: !Ref ClusterId
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+
+  SubnetRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn: Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-vpc-public-rt' ] ]
+      - Key: ClusterId
+        Value: !Ref ClusterId
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+
+  InternetGatewayRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: SubnetRouteTable
+    Properties:
+      RouteTableId: !Ref SubnetRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn: SubnetRouteTable
+    Properties:
+      RouteTableId: !Ref SubnetRouteTable
+      SubnetId: !Ref Subnet
+
+# Security Groups
+# https://docs.openshift.com/container-platform/3.11/install_config/configuring_aws.html#configuring-a-security-group-aws
+# https://docs.openshift.com/container-platform/3.11/install/prerequisites.html#required-ports
+
+  MasterNodeSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: !Join [ '', [ !Ref ClusterId, '-ocp-master-node-sg' ] ]
+      GroupDescription: Master Node Security Group
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-master-node-sg' ] ]
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+      - Key: ClusterId
+        Value: !Ref ClusterId
+
+  MasterNodeEgressTCP:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+
+  MasterNodeEgressUDP:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+
+  MasterNodeIngressBastionSSH:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      CidrIp: !Ref HomeCidr
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+
+  MasterNodeIngressMasterKubelet:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 10250
+      ToPort: 10250
+
+  MasterNodeIngressMasterSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  MasterNodeIngressInfraSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  MasterNodeIngressAppSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  MasterNodeIngressMasterDNSTCP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 8053
+      ToPort: 8053
+
+  MasterNodeIngressMasterDNSUDP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 8053
+      ToPort: 8053
+
+  MasterNodeIngressInfraDNSTCP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 8053
+      ToPort: 8053
+
+  MasterNodeIngressInfraDNSUDP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 8053
+      ToPort: 8053
+
+  MasterNodeIngressAppDNSTCP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 8053
+      ToPort: 8053
+
+  MasterNodeIngressAppDNSUDP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 8053
+      ToPort: 8053
+
+  MasterNodeIngressETCD:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 2379
+      ToPort: 2379
+
+  MasterNodeIngressETCDPeering:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 2380
+      ToPort: 2380
+
+  MasterNodeIngressHomeHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      CidrIp: !Ref HomeCidr
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  MasterNodeIngressMasterHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  MasterNodeIngressInfraHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  MasterNodeIngressAppHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  MasterNodeIngressCRIO:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt MasterNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 10010
+      ToPort: 10010
+
+  InfraNodeSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: !Join [ '', [ !Ref ClusterId, '-ocp-infra-node-sg' ] ]
+      GroupDescription: Infra Node Security Group
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-infra-node-sg' ] ]
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+      - Key: ClusterId
+        Value: !Ref ClusterId
+
+  InfraNodeEgressTCP:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+
+  InfraNodeEgressUDP:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+
+  InfraNodeIngressHomeSSH:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      CidrIp: !Ref HomeCidr
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+
+  InfraNodeIngressMasterKubelet:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 10250
+      ToPort: 10250
+
+  InfraNodeIngressMasterSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  InfraNodeIngressInfraSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  InfraNodeIngressAppSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  InfraNodeIngressHomeHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      CidrIp: !Ref HomeCidr
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  InfraNodeIngressMasterHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  InfraNodeIngressInfraHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  InfraNodeIngressAppHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  InfraNodeIngressHomeHTTP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      CidrIp: !Ref HomeCidr
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+
+  InfraNodeIngressMasterHTTP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+
+  InfraNodeIngressInfraHTTP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+
+  InfraNodeIngressAppHTTP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+
+  InfraNodeIngressStat:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      CidrIp: !Ref HomeCidr
+      IpProtocol: tcp
+      FromPort: 1936
+      ToPort: 1936
+
+  InfraNodeIngressInfraElasticSearchPeer:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 9300
+      ToPort: 9300
+
+  InfraNodeIngressInfraElasticSearchApi:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 9200
+      ToPort: 9200
+
+  InfraNodeIngressCRIO:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt InfraNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 10010
+      ToPort: 10010
+
+  AppNodeSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: !Join [ '', [ !Ref ClusterId, '-ocp-app-node-sg' ] ]
+      GroupDescription: Application Node Security Group
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-app-node-sg' ] ]
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+      - Key: ClusterId
+        Value: !Ref ClusterId
+
+  AppNodeEgressTCP:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+
+  AppNodeEgressUDP:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+
+  AppNodeIngressHomeSSH:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      CidrIp: !Ref HomeCidr
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+
+  AppNodeIngressMasterKubelet:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 10250
+      ToPort: 10250
+
+  AppNodeIngressMasterSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  AppNodeIngressInfraSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt InfraNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  AppNodeIngressAppSDN:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt AppNodeSG.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  AppNodeIngressCRIO:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt AppNodeSG.GroupId
+      SourceSecurityGroupId: !GetAtt MasterNodeSG.GroupId
+      IpProtocol: tcp
+      FromPort: 10010
+      ToPort: 10010
+
+# IAM
+# https://docs.openshift.com/container-platform/3.11/install_config/configuring_aws.html#configuring-aws-permissions
+
+  IAMRoleMaster:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: !Join [ '', [ !Ref ClusterId, '-ocp-iam-policy-master' ] ]
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:DescribeVolumes
+            - ec2:CreateVolume
+            - ec2:CreateTags
+            - ec2:DescribeInstances
+            - ec2:AttachVolume
+            - ec2:DetachVolume
+            - ec2:DeleteVolume
+            - ec2:DescribeSubnets
+            - ec2:DescribeSecurityGroups
+            - ec2:DescribeRouteTables
+            - ec2:DescribeInstance*
+            - elasticloadbalancing:DescribeTags
+            - elasticloadbalancing:DescribeLoadBalancers
+            - elasticloadbalancing:DescribeLoadBalancerAttributes
+            Resource: '*'
+      RoleName: !Join [ '', [ !Ref ClusterId, '-ocp-iam-role-master' ] ]
+
+  IAMInstanceProfileMaster:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - !Ref IAMRoleMaster
+      InstanceProfileName: !Join [ '', [ !Ref ClusterId, '-ocp-iam-instance-profile-master' ] ]
+
+  IAMRoleNode:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: !Join [ '', [ !Ref ClusterId, '-ocp-iam-policy-node' ] ]
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:DescribeInstance*
+            Resource: '*'
+      RoleName: !Join [ '', [ !Ref ClusterId, '-ocp-iam-role-node' ] ]
+
+  IAMInstanceProfileNode:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - !Ref IAMRoleNode
+      InstanceProfileName: !Join [ '', [ !Ref ClusterId, '-ocp-iam-instance-profile-node' ] ]
+
+# EC2 Instances
+
+  MasterNode:
+    Type: AWS::EC2::Instance
+    DependsOn: SubnetRouteTableAssociation
+    Properties:
+      AvailabilityZone: us-east-1a
+      BlockDeviceMappings:
+      - DeviceName: /dev/sda1
+        Ebs:
+          DeleteOnTermination: true
+          VolumeSize: 50
+          VolumeType: gp2
+      IamInstanceProfile: !Ref IAMInstanceProfileMaster
+      ImageId: !Ref AmiId
+      InstanceInitiatedShutdownBehavior: stop
+      InstanceType: !Ref MasterInstanceType
+      KeyName: !Ref Ec2Keypair
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: true
+        DeleteOnTermination: true
+        DeviceIndex: 0
+        GroupSet:
+        - !Ref MasterNodeSG
+        SubnetId: !Ref Subnet
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-master-node' ] ]
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+      - Key: ClusterId
+        Value: !Ref ClusterId
+
+  InfraNode:
+    Type: AWS::EC2::Instance
+    DependsOn: SubnetRouteTableAssociation
+    Properties:
+      AvailabilityZone: us-east-1a
+      BlockDeviceMappings:
+      - DeviceName: /dev/sda1
+        Ebs:
+          DeleteOnTermination: true
+          VolumeSize: 50
+          VolumeType: gp2
+      IamInstanceProfile: !Ref IAMInstanceProfileNode
+      ImageId: !Ref AmiId
+      InstanceInitiatedShutdownBehavior: stop
+      InstanceType: !Ref InfraInstanceType
+      KeyName: !Ref Ec2Keypair
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: true
+        DeleteOnTermination: true
+        DeviceIndex: 0
+        GroupSet:
+        - !Ref InfraNodeSG
+        SubnetId: !Ref Subnet
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-infra-node' ] ]
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+      - Key: ClusterId
+        Value: !Ref ClusterId
+
+  AppNode:
+    Type: AWS::EC2::Instance
+    DependsOn: SubnetRouteTableAssociation
+    Properties:
+      AvailabilityZone: us-east-1a
+      BlockDeviceMappings:
+      - DeviceName: /dev/sda1
+        Ebs:
+          DeleteOnTermination: true
+          VolumeSize: 100
+          VolumeType: gp2
+      IamInstanceProfile: !Ref IAMInstanceProfileNode
+      ImageId: !Ref AmiId
+      InstanceInitiatedShutdownBehavior: stop
+      InstanceType: !Ref AppInstanceType
+      KeyName: !Ref Ec2Keypair
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: true
+        DeleteOnTermination: true
+        DeviceIndex: 0
+        GroupSet:
+        - !Ref AppNodeSG
+        SubnetId: !Ref Subnet
+      Tags:
+      - Key: Name
+        Value: !Join [ '', [ !Ref ClusterId, '-ocp-app-node' ] ]
+      - Key: !Join [ '', [ 'kubernetes.io/cluster/', !Ref ClusterId ] ]
+        Value: !Ref ClusterId
+      - Key: ClusterId
+        Value: !Ref ClusterId
+
+# DNS Entries
+
+  MasterPublicAPIDNS:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Comment: !Sub "${ClusterId} master public api"
+      HostedZoneName: !Ref RootRoute53Domain
+      Name: !Join [ '.', [ 'api', !Ref ClusterId, 'ocp', !Ref RootRoute53Domain ] ]
+      Region: us-east-1
+      ResourceRecords:
+      - !GetAtt MasterNode.PublicIp
+      TTL: '900'
+      Type: 'A'
+      SetIdentifier: !Ref ClusterId
+
+  MasterInternalAPIDNS:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Comment: !Sub "${ClusterId} master internal api"
+      HostedZoneName: !Ref RootRoute53Domain
+      Name: !Join [ '.', [ 'internal', !Ref ClusterId, 'ocp', !Ref RootRoute53Domain ] ]
+      Region: us-east-1
+      ResourceRecords:
+      - !GetAtt MasterNode.PrivateIp
+      TTL: '900'
+      Type: 'A'
+      SetIdentifier: !Ref ClusterId
+
+  InfraHAProxyDNS:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Comment: !Sub "${ClusterId} infra haproxy"
+      HostedZoneName: !Ref RootRoute53Domain
+      Name: !Join [ '.', [ '*.apps', !Ref ClusterId, 'ocp', !Ref RootRoute53Domain ] ]
+      Region: us-east-1
+      ResourceRecords:
+      - !GetAtt InfraNode.PublicIp
+      TTL: '900'
+      Type: 'A'
+      SetIdentifier: !Ref ClusterId
