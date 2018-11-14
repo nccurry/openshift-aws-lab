@@ -782,7 +782,7 @@ Resources:
       Name: !Join [ '.', [ 'api', !Ref ClusterId, 'ocp', !Ref RootRoute53Domain ] ]
       Region: us-east-1
       ResourceRecords:
-      - !GetAtt MasterNode.PublicIp
+      - !Ref MasterEIP
       TTL: '900'
       Type: 'A'
       SetIdentifier: !Ref ClusterId
@@ -808,7 +808,7 @@ Resources:
       Name: !Join [ '.', [ '*.apps', !Ref ClusterId, 'ocp', !Ref RootRoute53Domain ] ]
       Region: us-east-1
       ResourceRecords:
-      - !GetAtt InfraNode.PublicIp
+      - !Ref InfraEIP
       TTL: '900'
       Type: 'A'
       SetIdentifier: !Ref ClusterId
