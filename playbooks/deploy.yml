@@ -5,7 +5,7 @@
   gather_facts: false
   become: false
   vars_files:
-  - defaults/main.yml
+  - ../defaults/main.yml
   tasks:
   - name: Ensure rhsm environment variables have been set
     fail:
@@ -31,7 +31,7 @@
     - cluster
 
   - name: Set current public IP address
-    command: curl https://ifconfig.co
+    command: curl -4 https://ifconfig.co
     changed_when: false
     register: public_ip
     tags:
@@ -50,7 +50,7 @@
 
   - name: Set profile in ec2.ini
     lineinfile:
-      path: inventory/ec2.ini
+      path: ../inventory/ec2.ini
       regexp: '^.*boto_profile =.*$'
       state: present
       line: 'boto_profile = {{ aws_profile }}'
@@ -94,7 +94,7 @@
         region: us-east-1
         profile: "{{ aws_profile }}"
         disable_rollback: true
-        template: files/cloudformation.yml
+        template: ../files/cloudformation.yml
         template_parameters:
           ClusterId: "{{ cluster_id }}"
           RootRoute53Domain: "{{ root_route_53_domain }}."
@@ -211,7 +211,7 @@
   gather_facts: false
   become: true
   vars_files:
-  - defaults/main.yml
+  - ../defaults/main.yml
   tags:
   - bootstrap
   tasks:

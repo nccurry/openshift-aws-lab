@@ -1,0 +1,17 @@
+#!/usr/bin/ansible-playbook
+---
+- name: Start cluster hosts
+  hosts: localhost
+  gather_facts: false
+  become: false
+  vars_files:
+  - ../../defaults/main.yml
+  tasks:
+  - name: Start cluster hosts
+    ec2:
+      instance_tags:
+        ClusterId: "{{ cluster_id }}"
+      profile: "{{ aws_profile }}"
+      region: us-east-1
+      state: running
+      wait: true

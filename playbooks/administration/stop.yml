@@ -1,0 +1,17 @@
+#!/usr/bin/ansible-playbook
+---
+- name: Stop cluster hosts
+  hosts: localhost
+  gather_facts: false
+  become: false
+  vars_files:
+  - ../../defaults/main.yml
+  tasks:
+  - name: Stop cluster hosts
+    ec2:
+      instance_tags:
+        ClusterId: "{{ cluster_id }}"
+      profile: "{{ aws_profile }}"
+      region: us-east-1
+      state: stopped
+      wait: true

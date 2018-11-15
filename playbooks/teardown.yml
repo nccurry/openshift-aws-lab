@@ -1,0 +1,132 @@
+#!/usr/bin/ansible-playbook
+- hosts: localhost
+  gather_facts: false
+  become: false
+  vars_files:
+  - ../defaults/main.yml
+  tasks:
+  - name: Create nodes hosts group
+    add_host:
+      name: "{{ hostvars[item].ec2_private_dns_name }}"
+      groups: nodes
+    changed_when: false
+    with_items: "{{
+      groups.get('tag_Name_' + cluster_id + '_ocp_master_node', []) +
+      groups.get('tag_Name_' + cluster_id + '_ocp_infra_node', [])  +
+      groups.get('tag_Name_' + cluster_id + '_ocp_app_node', [])
+      }}"
+    tags:
+    - rhsm
+
+  - name: Start ec2 instances if they are stopped
+    ec2:
+      instance_tags:
+        ClusterId: "{{ cluster_id }}"
+      profile: "{{ aws_profile }}"
+      region: us-east-1
+      state: running
+      wait: true
+
+- name: Unregister systems from rhsm
+  hosts: nodes
+  gather_facts: false
+  become: true
+  vars_files:
+  - ../defaults/main.yml
+  tasks:
+  - name: Wait 600 seconds for target connection to become reachable/usable
+    wait_for_connection:
+
+  # TODO: Mature deregistration
+  - name: Unregister systems from rhsm
+    command: subscription-manager unregister
+    ignore_errors: true
+
+  - name: Unregister systems from rhsm
+    command: subscription-manager clean
+    ignore_errors: true
+
+- name: Teardown infrastructure
+  hosts: localhost
+  gather_facts: false
+  become: false
+  vars_files:
+  - ../defaults/main.yml
+  tasks:
+  - name: Remove ssh configurations
+    blockinfile:
+      path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+      marker: "#### {mark} {{ cluster_id }}-ocp-environment ####"
+      state: absent
+    tags:
+    - ssh
+
+  # The following hosted zone tasks are needed because Cloudformation does not delete DNS record sets in Route 53
+  - name: Get hosted zone id
+    command: "aws route53 list-hosted-zones-by-name --profile {{ aws_profile }} --query 'HostedZones[?Name==`{{ root_route_53_domain }}.`]'"
+    changed_when: false
+    register: hosted_zone_id
+    tags:
+    - deploy
+
+  - name: Get hosted zone record sets
+    command: "aws route53 list-resource-record-sets --profile {{ aws_profile }} --hosted-zone-id '{{ (hosted_zone_id.stdout | from_json)[0].Id }}' --query 'ResourceRecordSets[?SetIdentifier==`{{ cluster_id }}`]'"
+    changed_when: false
+    register: record_sets
+    tags:
+    - deploy
+
+  - name: Remove cluster records from hosted zone
+    block:
+    - name: Create change-batch file
+      copy:
+        dest: "/tmp/{{ cluster_id }}-change-batch.json"
+        content: |
+          {
+            "Comment": "Removing {{ cluster_id }} record sets",
+            "Changes": [
+              {% for record in (record_sets.stdout | from_json) %}
+              {
+                "Action": "DELETE",
+                "ResourceRecordSet": {{ record | to_json }}
+              }{% if not loop.last %},{% endif %}
+              {% endfor %}
+            ]
+          }
+
+    - name: Delete hosted zone record sets
+      command: "aws route53 change-resource-record-sets --profile {{ aws_profile }} --hosted-zone-id '{{ (hosted_zone_id.stdout | from_json)[0].Id }}' --change-batch file:///tmp/{{ cluster_id }}-change-batch.json"
+
+    - name: Delete change-batch file
+      file:
+        state: absent
+        path: "/tmp/{{ cluster_id }}-change-batch"
+    when: (record_sets.stdout | from_json) | len > 0
+    tags:
+    - deploy
+
+  - name: Delete cloudformation stack
+    block:
+    - cloudformation:
+        stack_name: "{{ cluster_id }}-ocp-environment"
+        state: absent
+        region: us-east-1
+        profile: "{{ aws_profile }}"
+    tags:
+    - deploy
+
+  - name: Delete private key file
+    file:
+      path: "{{ lookup('env', 'HOME') }}/.ssh/{{ ec2_keypair }}"
+      state: absent
+    tags:
+    - deploy
+
+  - name: Delete ec2 keypair
+    ec2_key:
+      name: "{{ ec2_keypair }}"
+      state: absent
+      region: us-east-1
+      profile: "{{ aws_profile }}"
+    tags:
+    - deploy
